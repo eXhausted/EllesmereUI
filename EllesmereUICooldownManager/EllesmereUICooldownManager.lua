@@ -1203,20 +1203,8 @@ local TALENT_AWARE_BAR_TYPES = { cooldowns = true, utility = true }
 --  Knight") while the real tracked spell lives in linkedSpellIDs.
 -------------------------------------------------------------------------------
 local function ResolveInfoSpellID(info)
-    if not info then return nil end
-    local sid
-    if info.overrideSpellID and info.overrideSpellID > 0 then
-        sid = info.overrideSpellID
-    else
-        local linked = info.linkedSpellIDs
-        if linked then
-            for i = 1, #linked do
-                if linked[i] and linked[i] > 0 then sid = linked[i]; break end
-            end
-        end
-        if not sid and info.spellID and info.spellID > 0 then sid = info.spellID end
-    end
-    return sid and (BUFF_SPELLID_CORRECTIONS[sid] or sid) or nil
+    local logic = ns.CDMSpellLogic
+    return logic and logic.ResolveInfoSpellID and logic.ResolveInfoSpellID(info, BUFF_SPELLID_CORRECTIONS) or nil
 end
 
 -------------------------------------------------------------------------------
@@ -1303,18 +1291,8 @@ end
 --  for DK abilities) still have a real cooldown, so they pass through.
 -------------------------------------------------------------------------------
 local function IsTrulyPassive(sid)
-    if not sid or sid <= 0 then return false end
-    if not (C_Spell.IsSpellPassive and C_Spell.IsSpellPassive(sid)) then return false end
-    -- Spell is flagged passive -- check if it also has no base cooldown.
-    -- If it has a cooldown it's an active ability that happens to be passive-flagged.
-    -- GetSpellBaseCooldown returns a plain number (ms), safe to compare unlike
-    -- GetSpellCooldown which returns a secret value that taints on comparison.
-    local baseCd = C_Spell.GetSpellBaseCooldown and C_Spell.GetSpellBaseCooldown(sid)
-    if baseCd and baseCd > 0 then return false end
-    -- Also check charges — a spell with charges is active regardless of passive flag.
-    local chargeInfo = C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(sid)
-    if chargeInfo and chargeInfo.maxCharges and chargeInfo.maxCharges > 0 then return false end
-    return true
+    local logic = ns.CDMSpellLogic
+    return logic and logic.IsTrulyPassive and logic.IsTrulyPassive(sid, C_Spell) or false
 end
 
 -------------------------------------------------------------------------------
@@ -1323,45 +1301,13 @@ end
 --  spells, then resolves each cdID to its base spellID.
 -------------------------------------------------------------------------------
 local function BuildKnownSpellIDSet()
-    local known = {}
-    if not C_CooldownViewer or not C_CooldownViewer.GetCooldownViewerCategorySet then return known end
-    for cat = 0, 3 do
-        local knownIDs = C_CooldownViewer.GetCooldownViewerCategorySet(cat, false)
-        if knownIDs then
-            -- Passive filter only for cooldown categories (0/1).
-            -- Buff/debuff categories (2/3) contain proc auras which are passive by nature.
-            local filterPassives = (cat == 0 or cat == 1)
-            for _, cdID in ipairs(knownIDs) do
-                local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(cdID)
-                if info then
-                    local primarySid = ResolveInfoSpellID(info)
-                    local skip = filterPassives and primarySid and IsTrulyPassive(primarySid)
-                    if not skip then
-                        -- Store ALL related spell IDs so reconcile can match
-                        -- regardless of whether the bar stores the base ID,
-                        -- override ID, or a linked ID.
-                        if primarySid and primarySid > 0 then
-                            known[primarySid] = true
-                        end
-                        if info.spellID and info.spellID > 0 then
-                            known[info.spellID] = true
-                        end
-                        if info.overrideSpellID and info.overrideSpellID > 0 then
-                            known[info.overrideSpellID] = true
-                        end
-                        if info.linkedSpellIDs then
-                            for _, lsid in ipairs(info.linkedSpellIDs) do
-                                if lsid and lsid > 0 then
-                                    known[lsid] = true
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return known
+    local logic = ns.CDMSpellLogic
+    if not (logic and logic.BuildKnownSpellIDSet) then return {} end
+    return logic.BuildKnownSpellIDSet(C_CooldownViewer, {
+        buffSpellIdCorrections = BUFF_SPELLID_CORRECTIONS,
+        filterPassivesByCategory = true,
+        isTrulyPassive = IsTrulyPassive,
+    })
 end
 
 --- Deep-copy a table (simple values + nested tables, no metatables/functions)
