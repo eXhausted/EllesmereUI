@@ -56,7 +56,6 @@ local BUFF_PROC_ICON_OVERRIDES = {
 local BUFF_SPELLID_CORRECTIONS = {
     [12950] = 85739,  -- Improved Whirlwind
 }
-local CDMSpellLogic = ns.CDMSpellLogic or {}
 
 -------------------------------------------------------------------------------
 --  Shape Constants (shared with action bars)
@@ -1204,7 +1203,8 @@ local TALENT_AWARE_BAR_TYPES = { cooldowns = true, utility = true }
 --  Knight") while the real tracked spell lives in linkedSpellIDs.
 -------------------------------------------------------------------------------
 local function ResolveInfoSpellID(info)
-    return CDMSpellLogic.ResolveInfoSpellID(info, BUFF_SPELLID_CORRECTIONS)
+    local logic = ns.CDMSpellLogic
+    return logic and logic.ResolveInfoSpellID and logic.ResolveInfoSpellID(info, BUFF_SPELLID_CORRECTIONS) or nil
 end
 
 -------------------------------------------------------------------------------
@@ -1291,7 +1291,8 @@ end
 --  for DK abilities) still have a real cooldown, so they pass through.
 -------------------------------------------------------------------------------
 local function IsTrulyPassive(sid)
-    return CDMSpellLogic.IsTrulyPassive(sid, C_Spell)
+    local logic = ns.CDMSpellLogic
+    return logic and logic.IsTrulyPassive and logic.IsTrulyPassive(sid, C_Spell) or false
 end
 
 -------------------------------------------------------------------------------
@@ -1300,7 +1301,9 @@ end
 --  spells, then resolves each cdID to its base spellID.
 -------------------------------------------------------------------------------
 local function BuildKnownSpellIDSet()
-    return CDMSpellLogic.BuildKnownSpellIDSet(C_CooldownViewer, {
+    local logic = ns.CDMSpellLogic
+    if not (logic and logic.BuildKnownSpellIDSet) then return {} end
+    return logic.BuildKnownSpellIDSet(C_CooldownViewer, {
         buffSpellIdCorrections = BUFF_SPELLID_CORRECTIONS,
         filterPassivesByCategory = true,
         isTrulyPassive = IsTrulyPassive,
