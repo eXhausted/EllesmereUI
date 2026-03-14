@@ -1074,6 +1074,11 @@ end
 -- spec switch. Called from multiple events as a safety net so the CDM can
 -- NEVER show the wrong spec's icons.
 local _specValidated = false
+local _specSwitchActive = false  -- true while SwitchSpecProfile pipeline is running
+local _lastSpecChangeAt = 0
+local _lastZoneInAt = 0
+local _talentRebuildPending = false
+local _talentRebuildRetries = 0
 local function ValidateSpec()
     if not ECME.db then return end
     local realKey = GetCurrentSpecKey()
@@ -1311,6 +1316,20 @@ local function BuildKnownSpellIDSet()
     return known
 end
 
+-------------------------------------------------------------------------------
+--  Readiness check for cooldown viewer data
+-------------------------------------------------------------------------------
+local function IsCooldownDataReady()
+    if _specSwitchActive then return false end
+    if GetCurrentSpecKey() == "0" then return false end
+    local now = GetTime and GetTime() or 0
+    if now - _lastSpecChangeAt < 2.0 then return false end
+    if now - _lastZoneInAt < 2.0 then return false end
+    local known = BuildKnownSpellIDSet()
+    if not known or not next(known) then return false end
+    return true
+end
+
 --- Deep-copy a table (simple values + nested tables, no metatables/functions)
 local function DeepCopy(src)
     if type(src) ~= "table" then return src end
@@ -1328,6 +1347,7 @@ local function SaveCurrentSpecProfile()
     local specKey = p.activeSpecKey
     if not specKey or specKey == "0" then return end
     if not p.specProfiles then p.specProfiles = {} end
+    local prior = p.specProfiles[specKey] or {}
 
     local prof = {}
 
@@ -1339,10 +1359,28 @@ local function SaveCurrentSpecProfile()
             local entry = {}
             if MAIN_BAR_KEYS[key] then
                 -- trackedSpells are now stable spellIDs — persist them.
-                entry.trackedSpells = DeepCopy(barData.trackedSpells)
-                entry.extraSpells   = DeepCopy(barData.extraSpells)
-                entry.removedSpells = DeepCopy(barData.removedSpells)
-                entry.dormantSpells = DeepCopy(barData.dormantSpells)
+                -- Preserve prior saved lists if live data is temporarily nil.
+                local priorEntry = prior.barSpells and prior.barSpells[key]
+                if barData.trackedSpells ~= nil then
+                    entry.trackedSpells = DeepCopy(barData.trackedSpells)
+                elseif priorEntry and priorEntry.trackedSpells ~= nil then
+                    entry.trackedSpells = DeepCopy(priorEntry.trackedSpells)
+                end
+                if barData.extraSpells ~= nil then
+                    entry.extraSpells = DeepCopy(barData.extraSpells)
+                elseif priorEntry and priorEntry.extraSpells ~= nil then
+                    entry.extraSpells = DeepCopy(priorEntry.extraSpells)
+                end
+                if barData.removedSpells ~= nil then
+                    entry.removedSpells = DeepCopy(barData.removedSpells)
+                elseif priorEntry and priorEntry.removedSpells ~= nil then
+                    entry.removedSpells = DeepCopy(priorEntry.removedSpells)
+                end
+                if barData.dormantSpells ~= nil then
+                    entry.dormantSpells = DeepCopy(barData.dormantSpells)
+                elseif priorEntry and priorEntry.dormantSpells ~= nil then
+                    entry.dormantSpells = DeepCopy(priorEntry.dormantSpells)
+                end
             elseif barData.barType ~= "misc" then
                 -- Custom non-misc bars: save customSpells
                 entry.customSpells = DeepCopy(barData.customSpells)
@@ -1456,6 +1494,8 @@ local function SwitchSpecProfile(newSpecKey)
     local p = ECME.db.profile
     local oldSpecKey = p.activeSpecKey
 
+    _specSwitchActive = true
+
     -- Save current spec (if valid)
     if oldSpecKey and oldSpecKey ~= "0" then
         SaveCurrentSpecProfile()
@@ -1479,6 +1519,13 @@ local function SwitchSpecProfile(newSpecKey)
         ForcePopulateBlizzardViewers(function()
             ForceResnapshotMainBars()
             StartResnapshotRetry()
+        end)
+        -- Clear the guard after rebuild; allow deferred talent reconcile to run
+        C_Timer.After(0.5, function()
+            _specSwitchActive = false
+            if _talentRebuildPending and IsCooldownDataReady() then
+                ScheduleTalentRebuild()
+            end
         end)
 
         -- Refresh options panel if open
@@ -7159,6 +7206,8 @@ eventFrame:RegisterEvent("STOP_MOVIE")
 -- Debounce token for talent-change rebuilds: rapid talent clicks collapse
 -- into a single deferred rebuild rather than firing once per click.
 local _talentRebuildToken = 0
+_talentRebuildPending = false
+_talentRebuildRetries = 0
 
 local function ScheduleTalentRebuild()
     _talentRebuildToken = _talentRebuildToken + 1
@@ -7184,6 +7233,16 @@ local function ScheduleTalentRebuild()
         -- Reconcile bar spellIDs against the new talent set.
         -- Unavailable spells are moved to dormant slots (preserving position);
         -- returning spells are re-inserted at their saved slot index.
+        if not IsCooldownDataReady() then
+            _talentRebuildPending = true
+            _talentRebuildRetries = _talentRebuildRetries + 1
+            if _talentRebuildRetries <= 5 then
+                C_Timer.After(1.0, ScheduleTalentRebuild)
+            end
+            return
+        end
+        _talentRebuildPending = false
+        _talentRebuildRetries = 0
         TalentAwareReconcile()
         -- Clear spell icon cache so custom bars pick up new textures for
         -- talent-swapped spells
@@ -7289,9 +7348,13 @@ eventFrame:SetScript("OnEvent", function(_, event, unit, updateInfo, arg3)
     end
     if event == "PLAYER_ENTERING_WORLD" then
         _inCombat = InCombatLockdown and InCombatLockdown() or false
+        _lastZoneInAt = GetTime() or 0
         -- Validate spec on every zone-in (catches auto spec swaps, login, etc.)
         C_Timer.After(0.5, function()
             ValidateSpec()
+            if _talentRebuildPending and IsCooldownDataReady() then
+                ScheduleTalentRebuild()
+            end
             -- If spec was already correct, just rebuild bars
             if not _specValidated then return end
             local newSpecKey = GetCurrentSpecKey()
@@ -7315,6 +7378,9 @@ eventFrame:SetScript("OnEvent", function(_, event, unit, updateInfo, arg3)
             -- If ValidateSpec just fixed the spec, rebuild bars now.
             -- (PLAYER_ENTERING_WORLD may have bailed early because spec wasn't ready.)
             if _specValidated then
+                if _talentRebuildPending and IsCooldownDataReady() then
+                    ScheduleTalentRebuild()
+                end
                 C_Timer.After(0.3, function()
                     BuildAllCDMBars()
                     ForcePopulateBlizzardViewers(function()
@@ -7330,6 +7396,7 @@ eventFrame:SetScript("OnEvent", function(_, event, unit, updateInfo, arg3)
         if EllesmereUI and EllesmereUI.InvalidateFrameCache then
             EllesmereUI.InvalidateFrameCache()
         end
+        _lastSpecChangeAt = GetTime() or 0
         local newSpecKey = GetCurrentSpecKey()
         local p = ECME.db.profile
         if newSpecKey ~= "0" and newSpecKey ~= p.activeSpecKey then
